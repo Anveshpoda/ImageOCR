@@ -661,7 +661,7 @@ if __name__ == "__main__":
     extractor = SignboardExtractor()
 
     # Just use regex + OCR (no model)
-    image_path = "../test_img.jpg"
+    image_path = "../img/test_img.jpg"
     result, all_text = extractor.extract_data(image_path)
 
     print("\n" + "="*50)
