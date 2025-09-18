@@ -63,7 +63,7 @@ async def extract_date(image_data: ImageURL):
         
         return {
             "success": True,
-            "extracted_date": result.get("date"),
+            "extracted_date": result,
             "all_detected_text": all_text
         }
         
