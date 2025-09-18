@@ -39,11 +39,11 @@ class SignboardExtractor:
         # )
 
         self.ocr = PaddleOCR(
-            use_angle_cls=True,
+            use_textline_orientation=True,  # Updated parameter name
             lang='en',
-            det_model_dir=None,  # Use default detection model
-            rec_model_dir=None,  # Use default recognition model
-            cls_model_dir=None   # Use default classification model
+            text_detection_model_dir=None,  # Updated parameter name
+            text_recognition_model_dir=None,  # Updated parameter name
+            textline_orientation_model_dir=None   # Updated parameter name
         )
         
         # NER labels for BIO tagging
@@ -95,69 +95,133 @@ class SignboardExtractor:
         
         return sharpened
 
-    def extract_text_with_positions(self, image_path: str) -> Tuple[str, List[Dict]]:
+    def extract_text_with_positions(self, image_path: str) -> Tuple[str, List[Dict], List[str]]:
         """
         Extract text using PaddleOCR with position information
         """
         # Preprocess image
         processed_image = self.preprocess_image(image_path)
 
-        # Run OCR (predict is recommended, but keep .ocr for now)
+        # Run OCR
         result = self.ocr.predict(image_path)
 
-        if not result or not result[0]:
-            return "", []
+        if not result:
+            return "", [], []
 
+        # Handle new PaddleOCR format
         text_blocks = []
         full_text = ""
+        all_detected_text = []
 
-        if not result:
-            return "", []
+        print(f"DEBUG: OCR result type: {type(result)}")
+        print(f"DEBUG: OCR result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
 
-        for r in result:
-            # In PaddleOCR >=3.0, predict() returns OCRResult objects
-            if hasattr(r, "txt"):
-                text = r.txt
-                confidence = getattr(r, "confidence", 1.0)
-                bbox = getattr(r, "poly", None)
-
+        # Extract data from the new format - result is directly a dictionary
+        if isinstance(result, dict):
+            # New format returns a dictionary directly
+            rec_texts = result.get('rec_texts', [])
+            rec_scores = result.get('rec_scores', [])
+            rec_polys = result.get('rec_polys', [])
+            
+            print("DEBUG: All detected text by OCR:")
+            for i, text in enumerate(rec_texts):
+                confidence = rec_scores[i] if i < len(rec_scores) else 1.0
+                print(f"  {i+1}. '{text}' (confidence: {confidence:.3f})")
+                all_detected_text.append(text)
+                
                 if confidence > 0.5 and text.strip():
+                    bbox = rec_polys[i] if i < len(rec_polys) else None
+                    
                     text_blocks.append({
                         "text": text,
-                        "bbox": bbox,
+                        "bbox": bbox.tolist() if bbox is not None else None,
                         "confidence": confidence,
-                        "position": self._get_position_info(bbox) if bbox else None
+                        "position": self._get_position_info(bbox) if bbox is not None else None
                     })
                     full_text += text + " "
-            else:
-                logger.warning(f"Unexpected OCR result format: {r}")
+        elif isinstance(result, list):
+            # Handle if result is a list containing the dictionary
+            for item in result:
+                if isinstance(item, dict) and 'rec_texts' in item:
+                    rec_texts = item.get('rec_texts', [])
+                    rec_scores = item.get('rec_scores', [])
+                    rec_polys = item.get('rec_polys', [])
+                    
+                    print("DEBUG: All detected text by OCR:")
+                    for i, text in enumerate(rec_texts):
+                        confidence = rec_scores[i] if i < len(rec_scores) else 1.0
+                        print(f"  {i+1}. '{text}' (confidence: {confidence:.3f})")
+                        all_detected_text.append(text)
+                        
+                        if confidence > 0.5 and text.strip():
+                            bbox = rec_polys[i] if i < len(rec_polys) else None
+                            
+                            text_blocks.append({
+                                "text": text,
+                                "bbox": bbox.tolist() if bbox is not None else None,
+                                "confidence": confidence,
+                                "position": self._get_position_info(bbox) if bbox is not None else None
+                            })
+                            full_text += text + " "
+                    break
+                else:
+                    # Fallback for older format
+                    if hasattr(item, "txt"):
+                        text = item.txt
+                        confidence = getattr(item, "confidence", 1.0)
+                        bbox = getattr(item, "poly", None)
+                        all_detected_text.append(text)
 
-        return full_text.strip(), text_blocks
+                        if confidence > 0.5 and text.strip():
+                            text_blocks.append({
+                                "text": text,
+                                "bbox": bbox,
+                                "confidence": confidence,
+                                "position": self._get_position_info(bbox) if bbox else None
+                            })
+                            full_text += text + " "
+                    else:
+                        logger.warning(f"Unexpected OCR result format: {item}")
+        else:
+            logger.warning(f"Unexpected OCR result format: {result}")
 
+        print(f"\nDEBUG: Combined full text: '{full_text.strip()}'")
+        return full_text.strip(), text_blocks, all_detected_text
 
-    def _get_position_info(self, bbox: List) -> Dict:
+    def _get_position_info(self, bbox) -> Dict:
         """
         Extract position information from bounding box
         """
-        # Calculate center, area, and position
-        x_coords = [point[0] for point in bbox]
-        y_coords = [point[1] for point in bbox]
-        
-        center_x = sum(x_coords) / 4
-        center_y = sum(y_coords) / 4
-        width = max(x_coords) - min(x_coords)
-        height = max(y_coords) - min(y_coords)
-        area = width * height
-        
-        return {
-            'center_x': center_x,
-            'center_y': center_y,
-            'width': width,
-            'height': height,
-            'area': area,
-            'top': min(y_coords),
-            'left': min(x_coords)
-        }
+        try:
+            # Handle numpy array
+            if hasattr(bbox, 'tolist'):
+                bbox = bbox.tolist()
+            
+            # Calculate center, area, and position
+            x_coords = [point[0] for point in bbox]
+            y_coords = [point[1] for point in bbox]
+            
+            center_x = sum(x_coords) / len(x_coords)
+            center_y = sum(y_coords) / len(y_coords)
+            width = max(x_coords) - min(x_coords)
+            height = max(y_coords) - min(y_coords)
+            area = width * height
+            
+            return {
+                'center_x': center_x,
+                'center_y': center_y,
+                'width': width,
+                'height': height,
+                'area': area,
+                'top': min(y_coords),
+                'left': min(x_coords)
+            }
+        except Exception as e:
+            logger.warning(f"Error processing bbox: {e}")
+            return {
+                'center_x': 0, 'center_y': 0, 'width': 0, 
+                'height': 0, 'area': 0, 'top': 0, 'left': 0
+            }
     
     def extract_with_regex(self, text: str) -> Dict[str, Optional[str]]:
         """
@@ -170,14 +234,26 @@ class SignboardExtractor:
             r'(?:0\d{2,4}[-.\s]?)?[6-9]\d{2}[-.\s]?\d{3}[-.\s]?\d{4}'
         ]
         
-        # GST pattern (15 characters)
-        gst_pattern = r'\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1}\b'
+        # GST pattern (15 characters) - Updated to handle the format in your data
+        gst_patterns = [
+            r'\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1}\b',
+            r'GSTIN\s+N[O0][-\s]*([A-Z0-9]{15})',
+            r'GST\s+N[O0][-\s]*([A-Z0-9]{15})',
+            r'\b[0-9]{2}[A-Z]{2}[0-9A-Z]{11}\b'
+        ]
         
         # Pincode pattern (6 digits)
         pincode_pattern = r'\b[1-9]\d{5}\b'
         
         # Email pattern
         email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        
+        # CIN pattern - updated to handle the format in your data
+        cin_patterns = [
+            r'CIN\s+No\s*[-\s]*([A-Z0-9]{21})',
+            r'CIN\s*[-:\s]*([A-Z0-9]{21})',
+            r'\b([A-Z]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6})\b'
+        ]
         
         data = {}
         
@@ -192,12 +268,34 @@ class SignboardExtractor:
         data['mobile'] = mobile
         
         # Extract GST
-        gst_match = re.search(gst_pattern, text.upper())
-        data['gst'] = gst_match.group() if gst_match else None
+        gst = None
+        for pattern in gst_patterns:
+            match = re.search(pattern, text.upper())
+            if match:
+                gst = match.group(1) if match.groups() else match.group()
+                # Clean GST number
+                gst = re.sub(r'[^\dA-Z]', '', gst)
+                if len(gst) == 15:
+                    break
+        data['gst'] = gst
+        
+        # Extract CIN
+        cin = None
+        for pattern in cin_patterns:
+            match = re.search(pattern, text.upper())
+            if match:
+                cin = match.group(1) if match.groups() else match.group()
+                # Clean CIN number
+                cin = re.sub(r'[^\dA-Z]', '', cin)
+                if len(cin) == 21:
+                    break
+        data['cin'] = cin
         
         # Extract pincode
         pincode_matches = re.findall(pincode_pattern, text)
-        data['pincode'] = pincode_matches[0] if pincode_matches else None
+        # Filter pincode to avoid GST numbers
+        valid_pincodes = [pc for pc in pincode_matches if not any(pc in gst_text for gst_text in [data['gst'] or '', data['cin'] or ''])]
+        data['pincode'] = valid_pincodes[0] if valid_pincodes else None
         
         # Extract email
         email_match = re.search(email_pattern, text)
@@ -260,7 +358,7 @@ class SignboardExtractor:
         
         return cleaned_data
     
-    def smart_name_extraction(self, text_blocks: List[Dict]) -> Optional[str]:
+    def smart_name_extraction(self, text_blocks: List[Dict], all_text: str) -> Optional[str]:
         """
         Smart business name extraction based on position and size
         """
@@ -277,19 +375,26 @@ class SignboardExtractor:
             if len(text) < 3 or text.isdigit():
                 continue
             
-            # Skip if contains phone number or pincode patterns
-            if re.search(r'\d{6,}', text):
+            # Skip if contains phone number, pincode, or GST patterns
+            if re.search(r'\d{6,}', text) or 'gstin' in text.lower() or 'cin' in text.lower():
                 continue
             
-            # Score based on position (higher score for top and center)
+            # Skip common business document terms
+            skip_terms = ['registered', 'officer', 'address', 'private', 'limited', 'technologies']
+            if any(term in text.lower() for term in skip_terms):
+                continue
+            
+            # Score based on position (higher score for top)
             position_score = 0
-            if block['position']['top'] < 100:  # Near top
+            if block['position'] and block['position']['top'] < 350:  # Near top
                 position_score += 3
-            if block['position']['center_x'] > 100:  # Not at very left
+            if block['position'] and block['position']['center_x'] > 100:  # Not at very left
                 position_score += 2
             
             # Score based on size (larger text more likely to be name)
-            size_score = min(block['position']['area'] / 1000, 5)
+            size_score = 0
+            if block['position']:
+                size_score = min(block['position']['area'] / 1000, 5)
             
             # Score based on text characteristics
             text_score = 0
@@ -299,6 +404,10 @@ class SignboardExtractor:
                 text_score += 1
             if not any(c.isdigit() for c in text):  # No digits
                 text_score += 2
+            
+            # Bonus for being the first text (likely title)
+            if text_blocks.index(block) == 0:
+                text_score += 3
             
             total_score = position_score + size_score + text_score
             
@@ -320,6 +429,7 @@ class SignboardExtractor:
         Extract business category using predefined patterns
         """
         categories = {
+            'technology': ['technology', 'technologies', 'software', 'it', 'tech', 'digital'],
             'restaurant': ['restaurant', 'cafe', 'hotel', 'food', 'kitchen', 'dining', 'biryani', 'pizza'],
             'medical': ['hospital', 'clinic', 'medical', 'doctor', 'pharmacy', 'dental'],
             'retail': ['store', 'shop', 'mart', 'bazaar', 'emporium', 'showroom'],
@@ -339,16 +449,40 @@ class SignboardExtractor:
         
         return None
     
+    def extract_address(self, text_blocks: List[Dict], full_text: str) -> Optional[str]:
+        """
+        Extract address from text blocks
+        """
+        # Look for address indicators
+        address_indicators = ['address', 'apartments', 'layout', 'road', 'street', 'colony', 'nagar']
+        
+        address_parts = []
+        for block in text_blocks:
+            text = block['text'].strip()
+            
+            # Skip if it's likely name, mobile, GST, etc.
+            if any(indicator in text.lower() for indicator in ['gstin', 'cin', 'registered']):
+                continue
+            
+            # Check if contains address indicators or seems like address
+            if (any(indicator in text.lower() for indicator in address_indicators) or
+                re.search(r'\d+-\d+', text) or  # Contains building numbers like B-305
+                'bangalore' in text.lower() or
+                'karnataka' in text.lower()):
+                address_parts.append(text)
+        
+        return ', '.join(address_parts) if address_parts else None
+    
     def extract_data(self, image_path: str) -> Dict[str, Optional[str]]:
         """
         Main extraction function combining all methods
         """
         try:
             # Extract text and positions
-            full_text, text_blocks = self.extract_text_with_positions(image_path)
+            full_text, text_blocks, all_detected_text = self.extract_text_with_positions(image_path)
             
             if not full_text:
-                return self._empty_result()
+                return self._empty_result(), []
             
             logger.info(f"Extracted text: {full_text}")
             
@@ -357,10 +491,13 @@ class SignboardExtractor:
             ner_data = self.extract_with_ner(full_text) if self.ner_pipeline else {}
             
             # Smart business name extraction
-            business_name = self.smart_name_extraction(text_blocks)
+            business_name = self.smart_name_extraction(text_blocks, full_text)
             
             # Extract category
             category = self.extract_category(full_text, text_blocks)
+            
+            # Extract address
+            address = self.extract_address(text_blocks, full_text)
             
             # Combine results with priority (NER > Regex > Smart extraction)
             result = {
@@ -368,7 +505,8 @@ class SignboardExtractor:
                 'mobile': ner_data.get('mobile') or regex_data.get('mobile'),
                 'category': ner_data.get('category') or category,
                 'gst': ner_data.get('gst') or regex_data.get('gst'),
-                'address': ner_data.get('address'),
+                'cin': regex_data.get('cin'),
+                'address': ner_data.get('address') or address,
                 'pincode': ner_data.get('pincode') or regex_data.get('pincode'),
                 'email': regex_data.get('email')  # Email from regex is usually reliable
             }
@@ -382,13 +520,16 @@ class SignboardExtractor:
                     clean_address = clean_address.replace(result['gst'], '').strip()
                 if result['pincode']:
                     clean_address = clean_address.replace(result['pincode'], '').strip()
+                # Clean up extra commas and spaces
+                clean_address = re.sub(r'\s*,\s*,\s*', ', ', clean_address)
+                clean_address = re.sub(r'^\s*,\s*|\s*,\s*$', '', clean_address)
                 result['address'] = clean_address if clean_address else None
             
-            return result
+            return result, all_detected_text
             
         except Exception as e:
             logger.error(f"Error extracting data: {e}")
-            return self._empty_result()
+            return self._empty_result(), []
     
     def _empty_result(self) -> Dict[str, None]:
         return {
@@ -396,6 +537,7 @@ class SignboardExtractor:
             'mobile': None,
             'category': None,
             'gst': None,
+            'cin': None,
             'address': None,
             'pincode': None,
             'email': None
@@ -520,8 +662,16 @@ if __name__ == "__main__":
 
     # Just use regex + OCR (no model)
     image_path = "../test_img.jpg"
-    result = extractor.extract_data(image_path)
+    result, all_text = extractor.extract_data(image_path)
 
-    print("Extracted Data:")
+    print("\n" + "="*50)
+    print("EXTRACTED DATA:")
+    print("="*50)
     for key, value in result.items():
         print(f"{key.title()}: {value}")
+    
+    print("\n" + "="*50)
+    print("ALL DETECTED TEXT:")
+    print("="*50)
+    for i, text in enumerate(all_text, 1):
+        print(f"{i:2d}. {text}")
