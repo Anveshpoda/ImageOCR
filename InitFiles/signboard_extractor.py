@@ -94,42 +94,47 @@ class SignboardExtractor:
         sharpened = cv2.filter2D(denoised, -1, kernel)
         
         return sharpened
-    
+
     def extract_text_with_positions(self, image_path: str) -> Tuple[str, List[Dict]]:
         """
         Extract text using PaddleOCR with position information
         """
         # Preprocess image
         processed_image = self.preprocess_image(image_path)
-        
-        # Run OCR
-        # result = self.ocr.ocr(processed_image, cls=True)
-        result = self.ocr.ocr(image_path)
-        
+
+        # Run OCR (predict is recommended, but keep .ocr for now)
+        result = self.ocr.predict(image_path)
+
         if not result or not result[0]:
             return "", []
-        
-        # Extract text and positions
+
         text_blocks = []
         full_text = ""
-        
-        for line in result[0]:
-            bbox = line[0]  # Bounding box coordinates
-            text = line[1][0]  # Recognized text
-            confidence = line[1][1]  # Confidence score
-            
-            # Only include high-confidence text
-            if confidence > 0.5:
-                text_blocks.append({
-                    'text': text,
-                    'bbox': bbox,
-                    'confidence': confidence,
-                    'position': self._get_position_info(bbox)
-                })
-                full_text += text + " "
-        
+
+        if not result:
+            return "", []
+
+        for r in result:
+            # In PaddleOCR >=3.0, predict() returns OCRResult objects
+            if hasattr(r, "txt"):
+                text = r.txt
+                confidence = getattr(r, "confidence", 1.0)
+                bbox = getattr(r, "poly", None)
+
+                if confidence > 0.5 and text.strip():
+                    text_blocks.append({
+                        "text": text,
+                        "bbox": bbox,
+                        "confidence": confidence,
+                        "position": self._get_position_info(bbox) if bbox else None
+                    })
+                    full_text += text + " "
+            else:
+                logger.warning(f"Unexpected OCR result format: {r}")
+
         return full_text.strip(), text_blocks
-    
+
+
     def _get_position_info(self, bbox: List) -> Dict:
         """
         Extract position information from bounding box
@@ -514,7 +519,7 @@ if __name__ == "__main__":
     extractor = SignboardExtractor()
 
     # Just use regex + OCR (no model)
-    image_path = "signboard_image.jpg"
+    image_path = "../test_img.jpg"
     result = extractor.extract_data(image_path)
 
     print("Extracted Data:")
